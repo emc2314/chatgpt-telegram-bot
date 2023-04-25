@@ -11,13 +11,10 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import RetryAfter, NetworkError, BadRequest
 
-ADMIN_ID = 71863318
+ADMIN_ID = 361839406
 DEFAULT_MODEL = "gpt-4"
 def PROMPT(model):
-    s = "You are ChatGPT Telegram bot. ChatGPT is a large language model trained by OpenAI" + \
-        (", based on the GPT-4 architecture" if model == 'gpt-4' else "") + \
-        ". This Telegram bot is developed by zzh whose username is zzh1996. Answer as concisely as possible. Knowledge cutoff: Sep 2021. Current Beijing Time: {current_time}"
-    return s.replace('{current_time}', (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S'))
+    return f"As an advanced chatbot named ChatGPT based on model {model}, your primary goal is to assist users to the best of your ability. In order to effectively assist users, it is important to be detailed and thorough in your responses. Use examples and evidence to support your points and justify your recommendations or solutions. Knowledge cutoff: Sep 2021. Current Beijing Time: {(datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')}."
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -137,14 +134,15 @@ def only_whitelist(func):
         await func(update, context)
     return new_func
 
-async def completion(chat_history, model, chat_id, msg_id): # chat_history = [user, ai, user, ai, ..., user]
-    assert len(chat_history) % 2 == 1
+async def completion(chat_history, model, chat_id, msg_id):
     messages=[{"role": "system", "content": PROMPT(model)}]
-    roles = ["user", "assistant"]
-    role_id = 0
     for msg in chat_history:
-        messages.append({"role": roles[role_id], "content": msg})
-        role_id = 1 - role_id
+        if msg[0].startswith('$SYSTEM'):
+            messages[0]["content"] = msg[0][7:]
+        elif msg[0].startswith('$GPT'):
+            messages.append({"role": "assistant", "content": msg[0][4:]})
+        else:
+            messages.append({"role": "assistant" if msg[1] else "user", "content": msg[0]})
     logging.info('Request (chat_id=%r, msg_id=%r): %s', chat_id, msg_id, messages)
     stream = await openai.ChatCompletion.acreate(model=model, messages=messages, stream=True)
     async for response in stream:
@@ -163,8 +161,6 @@ async def completion(chat_history, model, chat_id, msg_id): # chat_history = [us
 
 def construct_chat_history(chat_id, msg_id):
     messages = []
-    should_be_bot = False
-    model = DEFAULT_MODEL
     while True:
         key = repr((chat_id, msg_id))
         if key not in db:
@@ -172,19 +168,12 @@ def construct_chat_history(chat_id, msg_id):
             return None, None
         is_bot, text, reply_id, *params = db[key]
         if params:
-            model = params[0]
-        if is_bot != should_be_bot:
-            logging.error('Role does not match (chat_id=%r, msg_id=%r)', chat_id, msg_id)
-            return None, None
-        messages.append(text)
-        should_be_bot = not should_be_bot
+            pass
+        messages.append((text, is_bot))
         if reply_id is None:
             break
         msg_id = reply_id
-    if len(messages) % 2 != 1:
-        logging.error('First message not from user (chat_id=%r, msg_id=%r)', chat_id, msg_id)
-        return None, None
-    return messages[::-1], model
+    return messages[::-1]
 
 @only_admin
 async def add_whitelist_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,23 +310,22 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_to_message = update.message.reply_to_message
     reply_to_id = None
     model = DEFAULT_MODEL
-    if reply_to_message is not None and update.message.reply_to_message.from_user.id == bot_id: # user reply to bot message
+    if reply_to_message is not None and repr((chat_id, reply_to_message.message_id)) in db:
         reply_to_id = reply_to_message.message_id
         await pending_reply_manager.wait_for((chat_id, reply_to_id))
-    elif text.startswith('$'): # new message
-        if text.startswith('$'):
-            if text.startswith('$$'):
-                text = text[2:]
-                model = "gpt-3.5-turbo"
-            else:
-                text = text[1:]
-    else: # not reply or new message to bot
-        if update.effective_chat.id == update.message.from_user.id: # if in private chat, send hint
-            await send_message(update.effective_chat.id, 'Please start a new conversation with $ or reply to a bot message', update.message.message_id)
+    elif text.startswith('$'):
+        if not (text.startswith('$SYSTEM') or text.startswith('$GPT')):
+            text = text[1:]
+    elif update.effective_chat.id != update.message.from_user.id:
         return
+
+    if text.startswith('^'):
+        model = 'gpt-3.5-turbo'
+        text = text[1:]
+
     db[repr((chat_id, msg_id))] = (False, text, reply_to_id, model)
 
-    chat_history, model = construct_chat_history(chat_id, msg_id)
+    chat_history = construct_chat_history(chat_id, msg_id)
     if chat_history is None:
         await send_message(update.effective_chat.id, f"[!] Error: Unable to proceed with this conversation. Potential causes: the message replied to may be incomplete, contain an error, be a system message, or not exist in the database.", update.message.message_id)
         return
@@ -378,6 +366,9 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_message(update.effective_chat.id, f'chat_id={update.effective_chat.id} user_id={update.message.from_user.id} is_whitelisted={is_whitelist(update.effective_chat.id)}', update.message.message_id)
 
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_message(update.effective_chat.id, 'available commands: /ping /help /add_whitelist /del_whitelist /get_whitelist\nStart converstation directly in private chat, or use $ to start a conversation in a group. Use $SYSTEM to set system prompt, and use $GPT to fake as gpt response. Use ^ to use gpt-3.5-turbo.', update.message.message_id)
+
 if __name__ == '__main__':
     logFormatter = logging.Formatter("%(asctime)s %(process)d %(levelname)s %(message)s")
 
@@ -402,6 +393,7 @@ if __name__ == '__main__':
         application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
         application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), reply_handler))
         application.add_handler(CommandHandler('ping', ping))
+        application.add_handler(CommandHandler('help', help))
         application.add_handler(CommandHandler('add_whitelist', add_whitelist_handler))
         application.add_handler(CommandHandler('del_whitelist', del_whitelist_handler))
         application.add_handler(CommandHandler('get_whitelist', get_whitelist_handler))
