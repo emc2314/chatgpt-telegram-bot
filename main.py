@@ -108,7 +108,7 @@ def only_admin(func):
         if update.message is None:
             return
         if update.message.from_user.id != ADMIN_ID:
-            await send_message(update.effective_chat.id, 'Only admin can use this command', update.message.message_id)
+            send_message(update.effective_chat.id, 'Only admin can use this command', update.message.message_id)
             return
         await func(update, context)
     return new_func
@@ -118,7 +118,7 @@ def only_private(func):
         if update.message is None:
             return
         if update.effective_chat.id != update.message.from_user.id:
-            await send_message(update.effective_chat.id, 'This command only works in private chat', update.message.message_id)
+            send_message(update.effective_chat.id, 'This command only works in private chat', update.message.message_id)
             return
         await func(update, context)
     return new_func
@@ -129,7 +129,7 @@ def only_whitelist(func):
             return
         if not is_whitelist(update.effective_chat.id):
             if update.effective_chat.id == update.message.from_user.id:
-                await send_message(update.effective_chat.id, 'This chat is not in whitelist', update.message.message_id)
+                send_message(update.effective_chat.id, 'This chat is not in whitelist', update.message.message_id)
             return
         await func(update, context)
     return new_func
@@ -144,7 +144,7 @@ async def completion(chat_history, model, chat_id, msg_id):
         else:
             messages.append({"role": "assistant" if msg[1] else "user", "content": msg[0]})
     logging.info('Request (chat_id=%r, msg_id=%r): %s', chat_id, msg_id, messages)
-    stream = await openai.ChatCompletion.acreate(model=model, messages=messages, stream=True, request_timeout=15)
+    stream = await openai.ChatCompletion.acreate(model=model, messages=messages, stream=True)
     async for response in stream:
         logging.info('Response (chat_id=%r, msg_id=%r): %s', chat_id, msg_id, json.dumps(response, ensure_ascii=False))
         obj = response['choices'][0]
@@ -270,8 +270,6 @@ class BotReplyMessages:
             text = text[self.msg_len:]
         if text:
             slices.append(text)
-        if not slices:
-            slices = [''] # deal with empty message
 
         for i in range(min(len(slices), len(self.replied_msgs))):
             msg_id, msg_text = self.replied_msgs[i]
@@ -371,16 +369,6 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_message(update.effective_chat.id, 'available commands: /ping /help /add_whitelist /del_whitelist /get_whitelist\nStart converstation directly in private chat, or use $ to start a conversation in a group. Use $SYSTEM to set system prompt, and use $GPT to fake as gpt response. Use ^ to use gpt-3.5-turbo.', update.message.message_id)
 
-async def post_init(application):
-    await application.bot.set_my_commands([
-        ('ping', 'Test bot connectivity'),
-        ('help', 'Print help message'),
-        ('add_whitelist', 'Add this group to whitelist (only admin)'),
-        ('del_whitelist', 'Delete this group from whitelist (only admin)'),
-        ('get_whitelist', 'List groups in whitelist (only admin)'),
-    ])
-
-
 if __name__ == '__main__':
     logFormatter = logging.Formatter("%(asctime)s %(process)d %(levelname)s %(message)s")
 
@@ -402,7 +390,7 @@ if __name__ == '__main__':
             db['whitelist'] = {ADMIN_ID}
         bot_id = int(TELEGRAM_BOT_TOKEN.split(':')[0])
         pending_reply_manager = PendingReplyManager()
-        application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).concurrent_updates(True).build()
+        application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
         application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), reply_handler))
         application.add_handler(CommandHandler('ping', ping))
         application.add_handler(CommandHandler('help', help))
